@@ -21,6 +21,7 @@ from flask import (
 
 app = Flask(__name__)
 app.secret_key = "local-demo-change-before-deployment"
+initialize_database()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "atm.db"
@@ -30,6 +31,57 @@ def get_db_connection():
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     return connection
+
+def initialize_database():
+    with get_db_connection() as connection:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                account_no INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                pin TEXT NOT NULL,
+                balance REAL NOT NULL,
+                daily_withdrawal REAL DEFAULT 0,
+                account_locked INTEGER DEFAULT 0,
+                pin_attempts INTEGER DEFAULT 0
+            )
+        """)
+
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_no INTEGER,
+                transaction_type TEXT,
+                amount REAL,
+                balance_after REAL,
+                date TEXT,
+                time TEXT
+            )
+        """)
+
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS atm_cash (
+                denomination INTEGER PRIMARY KEY,
+                note_count INTEGER
+            )
+        """)
+
+        connection.executemany("""
+            INSERT OR IGNORE INTO atm_cash (denomination, note_count)
+            VALUES (?, ?)
+        """, [(500, 100), (200, 100), (100, 100), (50, 100)])
+
+        connection.execute("""
+            INSERT OR IGNORE INTO users
+            (account_no, name, pin, balance)
+            VALUES (?, ?, ?, ?)
+        """, (1001, "Demo User", "1234", 50000))
+
+        connection.execute("""
+            INSERT OR IGNORE INTO users
+            (account_no, name, pin, balance)
+            VALUES (?, ?, ?, ?)
+        """, (1002, "Test User", "5678", 25000))
+
 
 
 def calculate_notes(amount, inventory):
