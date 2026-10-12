@@ -1,7 +1,8 @@
 __pycache__/
 *.py[cod]
 .venv/
+**/.venv/
 venv/
 .env
-atm.db
+*.db
 receipts/

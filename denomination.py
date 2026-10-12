@@ -1,48 +1,39 @@
-import sqlite3
 
-
-def connect_database():
-    return sqlite3.connect("atm.db")
-
-
-def calculate_denominations(amount):
-
-    connection = connect_database()
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT denomination, note_count
-        FROM atm_cash
-        ORDER BY denomination DESC
-    """)
-
-    cash_inventory = cursor.fetchall()
-
-    connection.close()
-
-    result = {}
-
-    for denomination, note_count in cash_inventory:
-
-        count_needed = amount // denomination
-
-        count_to_dispense = min(count_needed, note_count)
-
-        if count_to_dispense > 0:
-
-            result[denomination] = int(count_to_dispense)
-
-            amount = amount - (
-                denomination * count_to_dispense
-            )
-
-    if amount != 0:
+def calculate_notes(amount, inventory):
+    """
+    Find an exact combination of available ATM notes.
+    Returns {denomination: count}, or None if impossible.
+    """
+    if amount <= 0 or amount % 50 != 0:
         return None
 
-    return result
+    # Keep only usable denominations and available notes.
+    notes = [
+        (int(denomination), int(count))
+        for denomination, count in inventory
+        if int(denomination) > 0 and int(count) > 0
+    ]
 
+    # Dynamic programming: find a valid exact combination.
+    # dp[sum] stores the notes used to make that sum.
+    dp = {0: {}}
 
-    if amount != 0:
-        return None
+    for denomination, available in notes:
+        previous_sums = list(dp.keys())
 
-    return result
+        for current_sum in previous_sums:
+            for count in range(
+                1,
+                min(available, (amount - current_sum) // denomination) + 1
+            ):
+                new_sum = current_sum + denomination * count
+
+                if new_sum <= amount and new_sum not in dp:
+                    combination = dp[current_sum].copy()
+                    combination[denomination] = count
+                    dp[new_sum] = combination
+
+                if amount in dp:
+                    return dp[amount]
+
+    return dp.get(amount)
