@@ -3,6 +3,7 @@ import sys
 import sqlite3
 from pathlib import Path
 from datetime import datetime
+import random
 
 from flask import (
     Flask, render_template_string, request,
@@ -259,6 +260,29 @@ DASHBOARD_PAGE = """
             <p class="note">Withdrawal amounts must be multiples of ₹50.
             Available ATM notes are checked before dispensing.</p>
         </section>
+        <section class="card">
+            <h2>QR to Cash</h2>
+            <p>Generate a demo QR transaction and withdraw cash.</p>
+
+            <form method="POST" action="{{ url_for('qr_to_cash') }}">
+                <label for="qr_amount">Amount (₹)</label>
+                <input
+                    id="qr_amount"
+                    name="amount"
+                    type="number"
+                    min="50"
+                    step="50"
+                    placeholder="Enter amount"
+                    required
+                >
+                <button type="submit">Process QR to Cash</button>
+            </form>
+
+            <p class="note">
+                Demo transaction only. No real UPI payment is processed.
+            </p>
+        </section>
+
     </div>
 
     <section class="card">
@@ -551,6 +575,127 @@ def withdraw():
         connection.close()
 
     return redirect(url_for("dashboard"))
+
+
+# =========================
+# QR TO CASH ROUTE
+# =========================
+
+@app.route("/qr-to-cash", methods=["POST"])
+def qr_to_cash():
+    if "account_no" not in session:
+        return redirect(url_for("login"))
+
+    amount = parse_amount()
+
+    if amount is None or amount % 50 != 0:
+        flash("Enter a valid amount in multiples of ₹50.")
+        return redirect(url_for("dashboard"))
+
+    connection = get_db_connection()
+
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+
+        user = connection.execute(
+            "SELECT balance FROM users WHERE account_no = ?",
+            (session["account_no"],)
+        ).fetchone()
+
+        if user is None:
+            connection.rollback()
+            session.clear()
+            return redirect(url_for("login"))
+
+        if float(user["balance"]) < amount:
+            connection.rollback()
+            flash("Insufficient account balance.")
+            return redirect(url_for("dashboard"))
+
+        inventory_rows = connection.execute(
+            """
+            SELECT denomination, note_count
+            FROM atm_cash
+            ORDER BY denomination DESC
+            """
+        ).fetchall()
+
+        inventory = [
+            (int(row["denomination"]), int(row["note_count"]))
+            for row in inventory_rows
+        ]
+
+        notes = calculate_notes(amount, inventory)
+
+        if notes is None:
+            connection.rollback()
+            flash("ATM does not have enough suitable cash.")
+            return redirect(url_for("dashboard"))
+
+        new_balance = round(float(user["balance"]) - amount, 2)
+        now = datetime.now()
+
+        connection.execute(
+            "UPDATE users SET balance = ? WHERE account_no = ?",
+            (new_balance, session["account_no"])
+        )
+
+        for denomination, count in notes.items():
+            cursor = connection.execute(
+                """
+                UPDATE atm_cash
+                SET note_count = note_count - ?
+                WHERE denomination = ? AND note_count >= ?
+                """,
+                (count, denomination, count)
+            )
+
+            if cursor.rowcount != 1:
+                raise sqlite3.IntegrityError(
+                    "ATM cash inventory update failed."
+                )
+
+        connection.execute(
+            """
+            INSERT INTO transactions
+                (account_no, transaction_type, amount,
+                 balance_after, date, time)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session["account_no"],
+                "QR TO CASH",
+                amount,
+                new_balance,
+                now.strftime("%Y-%m-%d"),
+                now.strftime("%H:%M:%S")
+            )
+        )
+
+        connection.commit()
+
+        transaction_id = "QR" + str(random.randint(100000, 999999))
+        note_summary = ", ".join(
+            f"₹{denomination} × {count}"
+            for denomination, count in notes.items()
+        )
+
+        flash(
+            f"Demo QR-to-Cash successful! Transaction: {transaction_id}. "
+            f"₹{amount} dispensed. Notes: {note_summary}. "
+            f"Balance: ₹{new_balance:.2f}"
+        )
+
+    except sqlite3.Error:
+        connection.rollback()
+        app.logger.exception("QR-to-Cash transaction failed")
+        flash("QR-to-Cash failed due to a database error.")
+
+    finally:
+        connection.close()
+
+    return redirect(url_for("dashboard"))
+
 
 
 @app.route("/statement")
