@@ -1,4 +1,5 @@
 
+import os
 from pathlib import Path
 import sqlite3
 
@@ -8,12 +9,15 @@ from sklearn.ensemble import IsolationForest
 
 # Main ATM_SIMULATOR folder
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "atm.db"
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "demo_atm.db"
 
 
 def get_db_connection():
-    """Connect to the existing ATM database."""
-    return sqlite3.connect(DB_PATH, timeout=10)
+    """Connect to the same database used by the web app."""
+    connection = sqlite3.connect(DB_PATH, timeout=10)
+    connection.row_factory = sqlite3.Row
+    return connection
 
 
 def get_transaction_data():
@@ -79,7 +83,7 @@ def detect_anomaly(account_no, amount):
             SELECT COUNT(*)
             FROM transactions
             WHERE account_no = ?
-              AND transaction_type = 'WITHDRAW'
+            AND transaction_type = 'WITHDRAW'
             """,
             (account_no,)
         )

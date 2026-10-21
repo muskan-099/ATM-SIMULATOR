@@ -304,7 +304,6 @@ def deposit_cash(account_no):
         command=process_deposit
     ).pack(pady=20)
 
-
 # =========================
 # MINI STATEMENT
 # =========================

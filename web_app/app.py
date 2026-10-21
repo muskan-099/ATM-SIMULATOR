@@ -1,39 +1,46 @@
-
+import os
 import sys
-from pathlib import Path
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
-
-from ml_fraud_detection import detect_anomaly
-
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 from datetime import datetime
-
 
 from flask import (
     Flask, render_template_string, request,
     redirect, url_for, session, flash
 )
 
-app = Flask(__name__)
-app.secret_key = "local-demo-change-before-deployment"
-initialize_database()
-
+# Project paths
 BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "atm.db"
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+# Use a separate demo database so the original desktop ATM database is untouched.
+DB_PATH = Path(os.environ.get("ATM_DB_PATH", str(BASE_DIR / "demo_atm.db")))
+
+try:
+    from ml_fraud_detection import detect_anomaly
+except Exception:
+    detect_anomaly = None
+
+app = Flask(__name__)
+app.secret_key = os.environ.get(
+    "FLASK_SECRET_KEY",
+    "change-this-demo-secret-before-production"
+)
 
 
 def get_db_connection():
+    """Open a connection to the demo database."""
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     return connection
 
+
 def initialize_database():
-    with get_db_connection() as connection:
+    """Create required tables and sample demo data if they do not exist."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = get_db_connection()
+    try:
         connection.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 account_no INTEGER PRIMARY KEY,
@@ -45,7 +52,6 @@ def initialize_database():
                 pin_attempts INTEGER DEFAULT 0
             )
         """)
-
         connection.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,35 +63,36 @@ def initialize_database():
                 time TEXT
             )
         """)
-
         connection.execute("""
             CREATE TABLE IF NOT EXISTS atm_cash (
                 denomination INTEGER PRIMARY KEY,
                 note_count INTEGER
             )
         """)
-
         connection.executemany("""
             INSERT OR IGNORE INTO atm_cash (denomination, note_count)
             VALUES (?, ?)
         """, [(500, 100), (200, 100), (100, 100), (50, 100)])
-
         connection.execute("""
             INSERT OR IGNORE INTO users
-            (account_no, name, pin, balance)
+                (account_no, name, pin, balance)
             VALUES (?, ?, ?, ?)
         """, (1001, "Demo User", "1234", 50000))
-
         connection.execute("""
             INSERT OR IGNORE INTO users
-            (account_no, name, pin, balance)
+                (account_no, name, pin, balance)
             VALUES (?, ?, ?, ?)
         """, (1002, "Test User", "5678", 25000))
-
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def calculate_notes(amount, inventory):
-    """Return a possible note combination, or None."""
+    """Return a possible note combination, or None if unavailable."""
     result = {}
     remaining = amount
 
@@ -93,12 +100,24 @@ def calculate_notes(amount, inventory):
         inventory, key=lambda item: item[0], reverse=True
     ):
         count = min(remaining // denomination, available)
-
         if count > 0:
             result[denomination] = count
             remaining -= denomination * count
 
     return result if remaining == 0 else None
+
+
+def parse_amount():
+    """Read and validate a positive whole-number amount from a form."""
+    raw_amount = request.form.get("amount", "").strip()
+    try:
+        amount = int(raw_amount)
+    except (ValueError, TypeError):
+        return None
+
+    if amount <= 0:
+        return None
+    return amount
 
 
 LOGIN_PAGE = """
@@ -135,29 +154,181 @@ LOGIN_PAGE = """
             font-size: 16px; cursor: pointer;
         }
         .message { color: #fca5a5; text-align: center; }
+        .hint { font-size: 13px; }
     </style>
 </head>
 <body>
     <main class="card">
         <h1>ATM Simulator</h1>
         <p>Secure Banking · ML Fraud Detection</p>
-
         {% for message in get_flashed_messages() %}
             <div class="message">{{ message }}</div>
         {% endfor %}
-
         <form method="POST">
             <label for="account_no">Account Number</label>
             <input id="account_no" name="account_no"
-                   inputmode="numeric" required>
-
+                   inputmode="numeric" autocomplete="username" required>
             <label for="pin">ATM PIN</label>
             <input id="pin" name="pin" type="password"
-                   inputmode="numeric" required>
-
+                   inputmode="numeric" autocomplete="current-password" required>
             <button type="submit">Login Securely</button>
         </form>
+        <p class="hint">Demo account: 1001 / PIN: 1234</p>
+        <p class="hint">Second demo account: 1002 / PIN: 5678</p>
     </main>
+</body>
+</html>
+"""
+
+
+DASHBOARD_PAGE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ATM Simulator | Dashboard</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; padding: 24px; background: #0b1220;
+            color: white; font-family: Arial, sans-serif;
+        }
+        .container { max-width: 760px; margin: 25px auto; }
+        .card {
+            padding: 24px; margin-bottom: 20px;
+            border-radius: 16px; background: #172238;
+        }
+        h1, h2 { color: #60a5fa; }
+        .balance { font-size: 32px; font-weight: bold; }
+        .actions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 16px;
+        }
+        input, button {
+            width: 100%; padding: 12px; margin-top: 12px;
+            border-radius: 8px; font-size: 15px;
+        }
+        input {
+            border: 1px solid #475569;
+            background: #0b1220; color: white;
+        }
+        button {
+            border: 0; background: #2563eb;
+            color: white; cursor: pointer;
+        }
+        .withdraw button { background: #dc2626; }
+        .message { color: #fcd34d; margin-bottom: 10px; }
+        a { color: #93c5fd; }
+        .note { color: #cbd5e1; font-size: 13px; }
+    </style>
+</head>
+<body>
+<main class="container">
+    <section class="card">
+        <h1>Welcome, {{ user["name"] }}!</h1>
+        <p>ATM Simulator Web Banking</p>
+        {% for message in get_flashed_messages() %}
+            <p class="message">{{ message }}</p>
+        {% endfor %}
+        <p>Available balance</p>
+        <div class="balance">₹{{ "%.2f"|format(user["balance"]) }}</div>
+        <p><a href="{{ url_for('dashboard') }}">Refresh balance</a></p>
+    </section>
+
+    <div class="actions">
+        <section class="card">
+            <h2>Deposit</h2>
+            <form method="POST" action="{{ url_for('deposit') }}">
+                <label for="deposit_amount">Amount (₹)</label>
+                <input id="deposit_amount" name="amount" type="number"
+                       min="1" step="1" placeholder="Enter amount" required>
+                <button type="submit">Deposit Money</button>
+            </form>
+        </section>
+
+        <section class="card withdraw">
+            <h2>Withdraw</h2>
+            <form method="POST" action="{{ url_for('withdraw') }}">
+                <label for="withdraw_amount">Amount (₹)</label>
+                <input id="withdraw_amount" name="amount" type="number"
+                       min="50" step="50" placeholder="Multiple of ₹50" required>
+                <button type="submit">Withdraw Money</button>
+            </form>
+            <p class="note">Withdrawal amounts must be multiples of ₹50.
+            Available ATM notes are checked before dispensing.</p>
+        </section>
+    </div>
+
+    <section class="card">
+        <h2>Banking options</h2>
+        <p>Demo data is stored in a separate SQLite database.</p>
+        <p><a href="{{ url_for('statement') }}">View Mini Statement</a></p>
+        <a href="{{ url_for('logout') }}">Logout</a>
+    </section>
+</main>
+</body>
+</html>
+"""
+
+
+STATEMENT_PAGE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mini Statement</title>
+    <style>
+        body {
+            margin: 0; padding: 24px; background: #0b1220;
+            color: white; font-family: Arial, sans-serif;
+        }
+        .card {
+            max-width: 900px; margin: 20px auto; padding: 24px;
+            background: #172238; border-radius: 16px; overflow-x: auto;
+        }
+        h1 { color: #60a5fa; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td {
+            padding: 12px; text-align: left;
+            border-bottom: 1px solid #334155; white-space: nowrap;
+        }
+        th { color: #93c5fd; }
+        a { color: #93c5fd; }
+        .empty { color: #cbd5e1; }
+    </style>
+</head>
+<body>
+<main class="card">
+    <h1>Mini Statement</h1>
+    <p>Showing your latest 20 transactions.</p>
+    {% if transactions %}
+    <table>
+        <thead>
+            <tr>
+                <th>Type</th><th>Amount</th><th>Balance After</th>
+                <th>Date</th><th>Time</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for tx in transactions %}
+            <tr>
+                <td>{{ tx["transaction_type"] }}</td>
+                <td>₹{{ "%.2f"|format(tx["amount"]) }}</td>
+                <td>₹{{ "%.2f"|format(tx["balance_after"]) }}</td>
+                <td>{{ tx["date"] }}</td>
+                <td>{{ tx["time"] }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+        <p class="empty">No transactions found yet.</p>
+    {% endif %}
+    <p><a href="{{ url_for('dashboard') }}">Back to Dashboard</a></p>
+</main>
 </body>
 </html>
 """
@@ -219,120 +390,7 @@ def dashboard():
         session.clear()
         return redirect(url_for("login"))
 
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>ATM Simulator | Dashboard</title>
-        <style>
-            * { box-sizing: border-box; }
-            body {
-                margin: 0; padding: 24px; background: #0b1220;
-                color: white; font-family: Arial, sans-serif;
-            }
-            .container { max-width: 760px; margin: 25px auto; }
-            .card {
-                padding: 24px; margin-bottom: 20px;
-                border-radius: 16px; background: #172238;
-            }
-            h1, h2 { color: #60a5fa; }
-            .balance { font-size: 32px; font-weight: bold; }
-            .actions {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-                gap: 16px;
-            }
-            input, button {
-                width: 100%; padding: 12px; margin-top: 12px;
-                border-radius: 8px; font-size: 15px;
-            }
-            input {
-                border: 1px solid #475569;
-                background: #0b1220; color: white;
-            }
-            button {
-                border: 0; background: #2563eb;
-                color: white; cursor: pointer;
-            }
-            .withdraw button { background: #dc2626; }
-            .message { color: #fcd34d; margin-bottom: 10px; }
-            a { color: #93c5fd; }
-            .note { color: #cbd5e1; font-size: 13px; }
-        </style>
-    </head>
-    <body>
-        <main class="container">
-            <section class="card">
-                <h1>Welcome, {{ user["name"] }}!</h1>
-                <p>ATM Simulator Web Banking</p>
-
-                {% for message in get_flashed_messages() %}
-                    <p class="message">{{ message }}</p>
-                {% endfor %}
-
-                <p>Available balance</p>
-                <div class="balance">
-                    ₹{{ "%.2f"|format(user["balance"]) }}
-                </div>
-                <p><a href="{{ url_for('dashboard') }}">Refresh balance</a></p>
-            </section>
-
-            <div class="actions">
-                <section class="card">
-                    <h2>Deposit</h2>
-                    <form method="POST"
-                          action="{{ url_for('deposit') }}">
-                        <label for="deposit_amount">Amount (₹)</label>
-                        <input id="deposit_amount" name="amount"
-                               type="number" min="1" step="1"
-                               placeholder="Enter amount" required>
-                        <button type="submit">Deposit Money</button>
-                    </form>
-                </section>
-
-                <section class="card withdraw">
-                    <h2>Withdraw</h2>
-                    <form method="POST"
-                          action="{{ url_for('withdraw') }}">
-                        <label for="withdraw_amount">Amount (₹)</label>
-                        <input id="withdraw_amount" name="amount"
-                               type="number" min="50" step="50"
-                               placeholder="Multiple of ₹50" required>
-                        <button type="submit">Withdraw Money</button>
-                    </form>
-                    <p class="note">
-                        Withdrawal amounts must be multiples of ₹50.
-                        Available ATM notes are checked before dispensing.
-                    </p>
-                </section>
-            </div>
-
-            <section class="card">
-                <h2>Banking options</h2>
-                <p>Balance is retrieved from your existing SQLite database.</p>
-                <p><a href="{{ url_for('statement') }}">View Mini Statement</a></p>
-                <a href="{{ url_for('logout') }}">Logout</a>
-            </section>
-        </main>
-    </body>
-    </html>
-    """, user=user)
-
-
-def parse_amount():
-    raw_amount = request.form.get("amount", "").strip()
-
-    try:
-        amount = int(raw_amount)
-    except (ValueError, TypeError):
-        return None
-
-    if amount <= 0:
-        return None
-
-    return amount
+    return render_template_string(DASHBOARD_PAGE, user=user)
 
 
 @app.route("/deposit", methods=["POST"])
@@ -346,10 +404,8 @@ def deposit():
         return redirect(url_for("dashboard"))
 
     connection = get_db_connection()
-
     try:
         connection.execute("BEGIN IMMEDIATE")
-
         user = connection.execute(
             "SELECT balance FROM users WHERE account_no = ?",
             (session["account_no"],),
@@ -362,31 +418,26 @@ def deposit():
 
         new_balance = round(float(user["balance"]) + amount, 2)
         now = datetime.now()
-
         connection.execute(
             "UPDATE users SET balance = ? WHERE account_no = ?",
             (new_balance, session["account_no"]),
         )
-
         connection.execute(
             """
             INSERT INTO transactions
-                (account_no, transaction_type, amount,
-                 balance_after, date, time)
+                (account_no, transaction_type, amount, balance_after, date, time)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                session["account_no"], "DEPOSIT", amount,
-                new_balance, now.strftime("%Y-%m-%d"),
-                now.strftime("%H:%M:%S"),
+                session["account_no"], "DEPOSIT", amount, new_balance,
+                now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"),
             ),
         )
-
         connection.commit()
         flash(f"₹{amount} deposited successfully.")
-
     except sqlite3.Error:
         connection.rollback()
+        app.logger.exception("Deposit failed")
         flash("Deposit failed because of a database error.")
     finally:
         connection.close()
@@ -404,11 +455,23 @@ def withdraw():
         flash("Enter a withdrawal amount that is a multiple of ₹50.")
         return redirect(url_for("dashboard"))
 
-    connection = get_db_connection()
+    # ML check is best-effort only when the module is available.
+    # A model may not be trainable until enough transaction history exists.
+    if detect_anomaly is not None:
+        try:
+            is_suspicious = detect_anomaly(session["account_no"], amount)
+        except Exception:
+            app.logger.exception("ML anomaly detection failed")
+            flash("ML verification failed. Please try again.")
+            return redirect(url_for("dashboard"))
 
+        if is_suspicious:
+            flash("Unusual withdrawal pattern detected. Transaction was not processed.")
+            return redirect(url_for("dashboard"))
+
+    connection = get_db_connection()
     try:
         connection.execute("BEGIN IMMEDIATE")
-
         user = connection.execute(
             "SELECT balance FROM users WHERE account_no = ?",
             (session["account_no"],),
@@ -431,12 +494,10 @@ def withdraw():
             ORDER BY denomination DESC
             """
         ).fetchall()
-
         inventory = [
             (int(row["denomination"]), int(row["note_count"]))
             for row in inventory_rows
         ]
-
         notes = calculate_notes(amount, inventory)
 
         if notes is None:
@@ -446,7 +507,6 @@ def withdraw():
 
         new_balance = round(float(user["balance"]) - amount, 2)
         now = datetime.now()
-
         connection.execute(
             "UPDATE users SET balance = ? WHERE account_no = ?",
             (new_balance, session["account_no"]),
@@ -461,7 +521,6 @@ def withdraw():
                 """,
                 (count, denomination, count),
             )
-
             if cursor.rowcount != 1:
                 raise sqlite3.IntegrityError(
                     "ATM cash inventory changed during withdrawal."
@@ -470,80 +529,34 @@ def withdraw():
         connection.execute(
             """
             INSERT INTO transactions
-                (account_no, transaction_type, amount,
-                 balance_after, date, time)
+                (account_no, transaction_type, amount, balance_after, date, time)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                session["account_no"], "WITHDRAW", amount,
-                new_balance, now.strftime("%Y-%m-%d"),
-                now.strftime("%H:%M:%S"),
+                session["account_no"], "WITHDRAW", amount, new_balance,
+                now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"),
             ),
         )
-
         connection.commit()
-
         note_summary = ", ".join(
             f"₹{denomination} × {count}"
             for denomination, count in notes.items()
         )
         flash(f"₹{amount} withdrawn successfully. Notes: {note_summary}")
-
     except sqlite3.Error:
         connection.rollback()
+        app.logger.exception("Withdrawal failed")
         flash("Withdrawal failed because of a database error.")
     finally:
         connection.close()
 
     return redirect(url_for("dashboard"))
-    if amount is None or amount % 50 != 0:
-        flash("Enter a withdrawal amount that is a multiple of ₹50.")
-        return redirect(url_for("dashboard"))
-    
-    try:
-        is_suspicious = detect_anomaly(
-            session["account_no"],
-            amount
-        )
-    except Exception:
-        app.logger.exception("ML anomaly detection failed")
-        flash("Withdrawal could not be verified. Please try again.")
-        return redirect(url_for("dashboard"))
-
-    if is_suspicious:
-        flash(
-            "Suspicious withdrawal detected by ML. "
-            "Transaction was not processed."
-        )
-        return redirect(url_for("dashboard"))
-    connection = get_db_connection()
-
 
 
 @app.route("/statement")
 def statement():
     if "account_no" not in session:
         return redirect(url_for("login"))
-
-    
-    # ML-based anomaly detection
-    try:
-        is_suspicious = detect_anomaly(
-            session["account_no"],
-            amount
-        )
-    except Exception:
-        app.logger.exception("ML anomaly detection failed")
-        flash("Withdrawal could not be verified. Please try again.")
-        return redirect(url_for("dashboard"))
-
-    if is_suspicious:
-        flash(
-            "Suspicious withdrawal detected by ML. "
-            "Transaction was not processed."
-        )
-        return redirect(url_for("dashboard"))
-
 
     connection = get_db_connection()
     try:
@@ -560,79 +573,17 @@ def statement():
     finally:
         connection.close()
 
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Mini Statement</title>
-        <style>
-            body {
-                margin: 0; padding: 24px;
-                background: #0b1220; color: white;
-                font-family: Arial, sans-serif;
-            }
-            .card {
-                max-width: 900px; margin: 20px auto;
-                padding: 24px; background: #172238;
-                border-radius: 16px; overflow-x: auto;
-            }
-            h1 { color: #60a5fa; }
-            table { width: 100%; border-collapse: collapse; }
-            th, td {
-                padding: 12px; text-align: left;
-                border-bottom: 1px solid #334155;
-                white-space: nowrap;
-            }
-            th { color: #93c5fd; }
-            a { color: #93c5fd; }
-            .empty { color: #cbd5e1; }
-        </style>
-    </head>
-    <body>
-        <main class="card">
-            <h1>Mini Statement</h1>
-            <p>Showing your latest 20 transactions.</p>
-
-            {% if transactions %}
-            <table>
-                <thead>
-                    <tr>
-                        <th>Type</th>
-                        <th>Amount</th>
-                        <th>Balance After</th>
-                        <th>Date</th>
-                        <th>Time</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for tx in transactions %}
-                    <tr>
-                        <td>{{ tx["transaction_type"] }}</td>
-                        <td>₹{{ "%.2f"|format(tx["amount"]) }}</td>
-                        <td>₹{{ "%.2f"|format(tx["balance_after"]) }}</td>
-                        <td>{{ tx["date"] }}</td>
-                        <td>{{ tx["time"] }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            {% else %}
-                <p class="empty">No transactions found yet.</p>
-            {% endif %}
-
-            <p><a href="{{ url_for('dashboard') }}">Back to Dashboard</a></p>
-        </main>
-    </body>
-    </html>
-    """, transactions=transactions)
+    return render_template_string(STATEMENT_PAGE, transactions=transactions)
 
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+# Initialize only after the function and DB path are defined.
+initialize_database()
 
 
 if __name__ == "__main__":
